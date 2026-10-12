@@ -29,7 +29,7 @@ func defaultParams() Params {
 	return Params{
 		ECLevel: "M", Border: 4,
 		ColorMode: false, FgColor: "#000000", BgColor: "#FFFFFF",
-		AutoPage: true, CharsPerPage: 300, PageMarker: true,
+		AutoPage: true, CharsPerPage: 300, PageMarker: false,
 	}
 }
 
@@ -157,14 +157,22 @@ func savePNG(path string, img *image.NRGBA) error {
 // 自动/手动分页在容量预算中预留这一段，保证补上真实页码后仍能放入同一张二维码。
 const markerBudget = 12
 
+// Page 是一页二维码对应的原始文本片段（finalizeMarkers 后含 [p/N] 前缀）。
+type Page struct {
+	Text     string // 完整页文本（含 [p/N] 前缀，若启用页码）
+	Start    int    // 本页内容在原始文本中的起始 rune 下标（0 基，含）
+	End      int    // 本页内容在原始文本中的结束 rune 下标（0 基，不含）
+	Overflow bool   // true=本页内容超出单码容量，无法生成（仅"不分页"模式出现）
+}
+
 // splitPages 根据参数把长文本拆分为多页（每页内容都能独立编码为一张二维码）。
 // 返回 nil 表示文本为空。
-func splitPages(text string, p Params) ([]string, error) {
+func splitPages(text string, p Params) ([]Page, error) {
 	runes := []rune(text)
 	if len(runes) == 0 {
 		return nil, nil
 	}
-	var raw []string
+	var raw []Page
 	if p.AutoPage {
 		raw = greedyRaw(runes, p, p.PageMarker)
 	} else {
@@ -181,12 +189,12 @@ func fits(s string, p Params) bool {
 
 // greedyRaw 贪心地把 runes 拆分为尽可能大的若干页（每页都能编码成功）。
 // reserveMarker=true 时在容量预算中预留 markerBudget 长度，给后续添加页码留余量。
-func greedyRaw(runes []rune, p Params, reserveMarker bool) []string {
+func greedyRaw(runes []rune, p Params, reserveMarker bool) []Page {
 	budget := 0
 	if reserveMarker {
 		budget = markerBudget
 	}
-	var pages []string
+	var pages []Page
 	i := 0
 	for i < len(runes) {
 		lo, hi := i, len(runes)
@@ -207,51 +215,49 @@ func greedyRaw(runes []rune, p Params, reserveMarker bool) []string {
 			// 单个字符都无法编码（理论不可能），强制包含以免死循环
 			lo = i + 1
 		}
-		pages = append(pages, string(runes[i:lo]))
+		pages = append(pages, Page{Start: i, End: lo, Text: string(runes[i:lo])})
 		i = lo
 	}
 	return pages
 }
 
-// manualSplit 按固定字符数切分；若某段仍超出容量，则对该段再用贪心细分，保证每页都能编码。
-func manualSplit(runes []rune, p Params) []string {
+// manualSplit 按固定字符数切分为若干页；"不分页"模式下若某页超出单码容量，
+// 仅标记 Overflow（不重新拆分），符合"文本超长且不分页则不显示"的要求。
+func manualSplit(runes []rune, p Params) []Page {
 	chunk := p.CharsPerPage
 	if chunk < 1 {
 		chunk = 1
 	}
-	var raw []string
+	var pages []Page
 	for i := 0; i < len(runes); i += chunk {
 		end := i + chunk
 		if end > len(runes) {
 			end = len(runes)
 		}
 		seg := string(runes[i:end])
+		pg := Page{Start: i, End: end, Text: seg}
+		test := seg
 		if p.PageMarker {
-			if fits(strings.Repeat(" ", markerBudget)+seg, p) {
-				raw = append(raw, seg)
-			} else {
-				raw = append(raw, greedyRaw([]rune(seg), p, true)...)
-			}
-		} else {
-			if fits(seg, p) {
-				raw = append(raw, seg)
-			} else {
-				raw = append(raw, greedyRaw([]rune(seg), p, false)...)
-			}
+			test = strings.Repeat(" ", markerBudget) + seg
 		}
+		if !fits(test, p) {
+			pg.Overflow = true
+		}
+		pages = append(pages, pg)
 	}
-	return raw
+	return pages
 }
 
-// finalizeMarkers 在需要时为每页文本加上 [p/N] 前缀。
-func finalizeMarkers(pages []string, p Params) []string {
+// finalizeMarkers 在需要时为每页文本加上 [p/N] 前缀（保留原始文本区间 Start/End）。
+func finalizeMarkers(pages []Page, p Params) []Page {
 	if !p.PageMarker {
 		return pages
 	}
 	n := len(pages)
-	out := make([]string, n)
+	out := make([]Page, n)
 	for i, pg := range pages {
-		out[i] = fmt.Sprintf("[%d/%d] %s", i+1, n, pg)
+		out[i] = pg
+		out[i].Text = fmt.Sprintf("[%d/%d] %s", i+1, n, pg.Text)
 	}
 	return out
 }

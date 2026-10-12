@@ -74,10 +74,10 @@ func TestSplitLongAuto(t *testing.T) {
 		t.Fatalf("expected multiple pages, got %d", len(pages))
 	}
 	for i, pg := range pages {
-		if !strings.HasPrefix(pg, "[") {
-			t.Fatalf("page %d missing marker prefix: %q", i, pg[:min(20, len(pg))])
+		if !strings.HasPrefix(pg.Text, "[") {
+			t.Fatalf("page %d missing marker prefix: %q", i, pg.Text[:min(20, len(pg.Text))])
 		}
-		if _, err := renderPage(pg, p); err != nil {
+		if _, err := renderPage(pg.Text, p); err != nil {
 			t.Fatalf("page %d failed to render (too long?): %v", i, err)
 		}
 	}
@@ -97,9 +97,31 @@ func TestSplitLongManual(t *testing.T) {
 		t.Fatalf("expected multiple pages, got %d", len(pages))
 	}
 	for i, pg := range pages {
-		if _, err := renderPage(pg, p); err != nil {
+		if _, err := renderPage(pg.Text, p); err != nil {
 			t.Fatalf("page %d failed to render: %v", i, err)
 		}
+	}
+}
+
+func TestSplitManualOverflow(t *testing.T) {
+	// 不分页模式：单页字符数远超单码容量时，应标记为 Overflow 且不重新拆分。
+	long := strings.Repeat("C", 5000)
+	p := defaultParams()
+	p.AutoPage = false
+	p.CharsPerPage = 5000
+	p.PageMarker = false
+	pages, err := splitPages(long, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pages) != 1 {
+		t.Fatalf("manual mode must NOT re-split overflow; expected 1 page, got %d", len(pages))
+	}
+	if !pages[0].Overflow {
+		t.Fatalf("expected page 0 to be marked Overflow")
+	}
+	if pages[0].Text != long {
+		t.Fatalf("overflow page should preserve original segment, got len %d", len(pages[0].Text))
 	}
 }
 
@@ -116,7 +138,7 @@ func TestSplitChinese(t *testing.T) {
 		t.Fatalf("expected multiple pages for Chinese text, got %d", len(pages))
 	}
 	for i, pg := range pages {
-		if _, err := renderPage(pg, p); err != nil {
+		if _, err := renderPage(pg.Text, p); err != nil {
 			t.Fatalf("page %d render failed: %v", i, err)
 		}
 	}

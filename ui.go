@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"image"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/lxn/win"
 	"github.com/lxn/walk"
 )
 
@@ -16,6 +18,16 @@ func must[T any](v T, err error) T {
 		panic(err)
 	}
 	return v
+}
+
+// tight 给布局设置紧凑的间距与边距（单位 1/96"），让控件之间更紧凑。
+// NewVBoxLayout/NewHBoxLayout 均返回 *walk.BoxLayout（仅 orientation 不同）。
+func tight(l walk.Layout) walk.Layout {
+	if bl, ok := l.(*walk.BoxLayout); ok {
+		_ = bl.SetSpacing(2)
+		_ = bl.SetMargins(walk.Margins{HNear: 4, VNear: 2, HFar: 4, VFar: 2})
+	}
+	return l
 }
 
 // UI 持有界面状态与生成结果。walk 是事件驱动（非即时模式）框架，
@@ -53,9 +65,10 @@ type UI struct {
 
 	// 生成状态（mutex 保护跨 goroutine 访问）
 	mu           sync.Mutex
-	pages        []string
+	pages        []Page
 	pageCount    int
 	page         int
+	totalChars   int
 	hasQR        bool
 	curParams    Params
 	lastKey      string
@@ -63,6 +76,7 @@ type UI struct {
 	saveTimer    *time.Timer
 	savedText    string
 	skipSaveOnce bool
+	genSeq       uint64 // 递增的生成序号，防止后台计算乱序覆盖
 }
 
 // NewUI 构造 UI 默认状态。
@@ -86,21 +100,21 @@ func (u *UI) build() (*walk.MainWindow, error) {
 	if err := mw.SetMinMaxSize(walk.Size{Width: 760, Height: 560}, walk.Size{}); err != nil {
 		return nil, err
 	}
-	mw.SetLayout(walk.NewHBoxLayout())
+	mw.SetLayout(tight(walk.NewHBoxLayout()))
 
 	// ===== 主水平分栏：左=二维码，右=参数+输入 =====
 	hsplit := must(walk.NewHSplitter(mw))
 
 	// --- 左栏 ---
 	left := must(walk.NewComposite(hsplit))
-	left.SetLayout(walk.NewVBoxLayout())
+	left.SetLayout(tight(walk.NewVBoxLayout()))
 
 	u.qrView = must(walk.NewImageView(left))
 	u.qrView.SetMode(walk.ImageViewModeZoom)
-	u.qrView.SetMargin(8)
+	u.qrView.SetMargin(4)
 
 	navBar := must(walk.NewComposite(left))
-	navBar.SetLayout(walk.NewHBoxLayout())
+	navBar.SetLayout(tight(walk.NewHBoxLayout()))
 	navBar.SetMinMaxSize(walk.Size{Width: 0, Height: 34}, walk.Size{Width: 0, Height: 34})
 	u.prevBtn = must(walk.NewPushButton(navBar))
 	u.prevBtn.SetText("上一页")
@@ -108,6 +122,7 @@ func (u *UI) build() (*walk.MainWindow, error) {
 	u.pageLabel.SetText("第 1 / 1 页")
 	u.nextBtn = must(walk.NewPushButton(navBar))
 	u.nextBtn.SetText("下一页")
+	must(walk.NewHSpacer(navBar)) // 弹簧：把"保存图片"推到右侧，充满中间空白
 	u.saveImgBtn = must(walk.NewPushButton(navBar))
 	u.saveImgBtn.SetText("保存图片")
 
@@ -117,31 +132,27 @@ func (u *UI) build() (*walk.MainWindow, error) {
 
 	// --- 右栏（垂直分栏：参数 / 输入）---
 	right := must(walk.NewComposite(hsplit))
-	right.SetLayout(walk.NewVBoxLayout())
-	right.SetMinMaxSize(walk.Size{Width: 300, Height: 0}, walk.Size{Width: 440, Height: 0})
+	right.SetLayout(tight(walk.NewVBoxLayout()))
+	// 右栏固定为最优最小显示宽度：初始化即 300，且不再被拉伸（左栏随窗口伸缩）。
+	right.SetMinMaxSize(walk.Size{Width: 300, Height: 0}, walk.Size{Width: 300, Height: 0})
 
 	vsplit := must(walk.NewVSplitter(right))
 
-	// 参数区（可滚动）
+	// 参数区：参数控件直接挂在 paramPane 上，paramPane 在 VSplitter 中按内容高度贴合
+	// （非贪婪），剩余垂直空间全部交给下方输入区，避免参数区底部出现大片空白。
 	paramPane := must(walk.NewComposite(vsplit))
-	paramPane.SetLayout(walk.NewVBoxLayout())
-	paramPane.SetMinMaxSize(walk.Size{Width: 0, Height: 200}, walk.Size{Width: 0, Height: 440})
-	paramScroll := must(walk.NewScrollView(paramPane))
-	paramScroll.SetLayout(walk.NewVBoxLayout())
+	paramPane.SetLayout(tight(walk.NewVBoxLayout()))
 
-	title := must(walk.NewLabel(paramScroll))
-	title.SetText("生成参数")
-
-	ecRow := must(walk.NewComposite(paramScroll))
-	ecRow.SetLayout(walk.NewHBoxLayout())
+	ecRow := must(walk.NewComposite(paramPane))
+	ecRow.SetLayout(tight(walk.NewHBoxLayout()))
 	ecLbl := must(walk.NewLabel(ecRow))
 	ecLbl.SetText("容错级别")
 	u.ecCombo = must(walk.NewComboBox(ecRow))
-	_ = u.ecCombo.SetModel([]string{"L", "M", "Q", "H"})
+	_ = u.ecCombo.SetModel([]string{"L -- 7%", "M -- 15%", "Q -- 25%", "H -- 30%"})
 	_ = u.ecCombo.SetCurrentIndex(1)
 
-	borderRow := must(walk.NewComposite(paramScroll))
-	borderRow.SetLayout(walk.NewHBoxLayout())
+	borderRow := must(walk.NewComposite(paramPane))
+	borderRow.SetLayout(tight(walk.NewHBoxLayout()))
 	bLbl := must(walk.NewLabel(borderRow))
 	bLbl.SetText("静区/边距(模块)")
 	u.borderEdit = must(walk.NewNumberEdit(borderRow))
@@ -149,10 +160,11 @@ func (u *UI) build() (*walk.MainWindow, error) {
 	_ = u.borderEdit.SetValue(4)
 	_ = u.borderEdit.SetSpinButtonsVisible(true)
 
-	u.colorChk = must(walk.NewCheckBox(paramScroll))
+	u.colorChk = must(walk.NewCheckBox(paramPane))
 	u.colorChk.SetText("启用彩色二维码（预留）")
-	colorPane := must(walk.NewComposite(paramScroll))
-	colorPane.SetLayout(walk.NewHBoxLayout())
+	u.colorChk.SetVisible(false) // 彩色二维码为将来扩展功能，当前不显示
+	colorPane := must(walk.NewComposite(paramPane))
+	colorPane.SetLayout(tight(walk.NewHBoxLayout()))
 	fgLbl := must(walk.NewLabel(colorPane))
 	fgLbl.SetText("前景色")
 	u.fgEdit = must(walk.NewLineEdit(colorPane))
@@ -163,11 +175,12 @@ func (u *UI) build() (*walk.MainWindow, error) {
 	u.bgEdit.SetText("#FFFFFF")
 	colorPane.SetVisible(false)
 
-	u.autoPageChk = must(walk.NewCheckBox(paramScroll))
+	u.autoPageChk = must(walk.NewCheckBox(paramPane))
 	u.autoPageChk.SetText("自动分页（超出单码容量自动拆分）")
 	u.autoPageChk.SetChecked(true)
-	charsPane := must(walk.NewComposite(paramScroll))
-	charsPane.SetLayout(walk.NewHBoxLayout())
+	u.autoPageChk.SetAlignment(walk.AlignHNearVNear) // 左对齐（修正 walk 默认 AlignHVDefault 居中）
+	charsPane := must(walk.NewComposite(paramPane))
+	charsPane.SetLayout(tight(walk.NewHBoxLayout()))
 	cLbl := must(walk.NewLabel(charsPane))
 	cLbl.SetText("每页字符数")
 	u.charsEdit = must(walk.NewNumberEdit(charsPane))
@@ -176,25 +189,39 @@ func (u *UI) build() (*walk.MainWindow, error) {
 	_ = u.charsEdit.SetSpinButtonsVisible(true)
 	charsPane.SetVisible(false)
 
-	u.markerChk = must(walk.NewCheckBox(paramScroll))
+	u.markerChk = must(walk.NewCheckBox(paramPane))
 	u.markerChk.SetText("添加页码标记 [p/N]")
 	u.markerChk.SetChecked(false)
-
-	histBtn := must(walk.NewPushButton(paramScroll))
-	histBtn.SetText("管理历史记录")
-	hint := must(walk.NewLabel(paramScroll))
-	hint.SetText("输入后稍作停顿即自动存入历史")
+	u.markerChk.SetAlignment(walk.AlignHNearVNear) // 左对齐，与上方参数行一致
 
 	// 输入区
 	inputPane := must(walk.NewComposite(vsplit))
-	inputPane.SetLayout(walk.NewVBoxLayout())
+	inputPane.SetLayout(tight(walk.NewVBoxLayout()))
 	inLbl := must(walk.NewLabel(inputPane))
 	inLbl.SetText("输入文本")
 	inLbl.SetMinMaxSize(walk.Size{Width: 0, Height: 20}, walk.Size{Width: 0, Height: 20})
-	u.textEdit = must(walk.NewTextEdit(inputPane))
+	// 关键：walk 的 TextEdit 底层是 Windows 多行 EDIT 控件，NewTextEdit 创建时
+	// 默认样式只有 WS_TABSTOP|WS_VISIBLE|ES_MULTILINE|ES_WANTRETURN，**没有**
+	// ES_AUTOHSCROLL / ES_AUTOVSCROLL / WS_VSCROLL。因此当文本超出可见客户区时，
+	// 控件既不自动滚动、也无滚动条，光标移出可视区后新增/粘贴的内容看不见，
+	// 表现为“无法输入、粘贴失败”。这里用 NewTextEditWithStyle 补上滚动样式。
+	u.textEdit = must(walk.NewTextEditWithStyle(inputPane,
+		win.ES_AUTOHSCROLL|win.ES_AUTOVSCROLL|win.WS_VSCROLL))
+	// 同时解除 EDIT 控件默认的 ~30000 字符上限（置 0 = 无限制），避免超长文本被截断。
+	u.textEdit.SetMaxLength(0)
+	u.textEdit.SetAlignment(walk.AlignHNearVNear) // 左对齐并垂直充满，消除顶部空白
 	u.charCountLabel = must(walk.NewLabel(inputPane))
 	u.charCountLabel.SetText("字符数: 0")
 	u.charCountLabel.SetMinMaxSize(walk.Size{Width: 0, Height: 20}, walk.Size{Width: 0, Height: 20})
+
+	// 右栏底部：说明 + 管理历史按钮（放在右栏最下方）
+	bottomBar := must(walk.NewComposite(right))
+	bottomBar.SetLayout(tight(walk.NewHBoxLayout()))
+	bottomBar.SetMinMaxSize(walk.Size{Width: 0, Height: 30}, walk.Size{Width: 0, Height: 30})
+	hint := must(walk.NewLabel(bottomBar))
+	hint.SetText("输入后稍作停顿即自动存入历史")
+	histBtn := must(walk.NewPushButton(bottomBar))
+	histBtn.SetText("管理历史记录")
 
 	// ===== 事件绑定 =====
 	u.textEdit.TextChanged().Attach(func() {
@@ -244,10 +271,8 @@ func (u *UI) setStatus(s string) {
 // readParams 从界面控件读取当前生成参数。
 func (u *UI) readParams() Params {
 	ec := "M"
-	opts := []string{"L", "M", "Q", "H"}
-	idx := u.ecCombo.CurrentIndex()
-	if idx >= 0 && idx < len(opts) {
-		ec = opts[idx]
+	if t := strings.TrimSpace(u.ecCombo.Text()); t != "" {
+		ec = strings.Fields(t)[0] // 选项形如 "L -- 7%"，取首词作为容错级别
 	}
 	border := int(u.borderEdit.Value())
 	if border < 0 {
@@ -294,6 +319,9 @@ func (u *UI) scheduleGenerate() {
 }
 
 // regenerate 重新分页并渲染当前页。
+// 脏检测与参数读取在 UI 线程完成（walk 控件只能在 UI 线程访问）；
+// 耗时的分页/位图计算放到后台 goroutine，避免超长文本阻塞 UI 线程，
+// 结果再通过 Synchronize 回到 UI 线程更新控件。genSeq 用于丢弃过期结果。
 func (u *UI) regenerate() {
 	text := u.textEdit.Text()
 	p := u.readParams()
@@ -305,40 +333,71 @@ func (u *UI) regenerate() {
 	}
 	u.lastKey = key
 	u.curParams = p
+	myGen := u.genSeq + 1
+	u.genSeq = myGen
 	u.mu.Unlock()
 
-	pages, err := splitPages(text, p)
-	if err != nil {
-		u.setStatus("分页失败: " + err.Error())
-		return
-	}
-	u.mu.Lock()
-	u.pages = pages
-	u.pageCount = len(pages)
-	u.page = 0
-	u.hasQR = len(pages) > 0
-	u.mu.Unlock()
+	go func() {
+		pages, err := splitPages(text, p)
+		if err != nil {
+			u.mw.Synchronize(func() {
+				u.mu.Lock()
+				stale := u.genSeq != myGen
+				u.mu.Unlock()
+				if stale {
+					return
+				}
+				u.setStatus("分页失败: " + err.Error())
+			})
+			return
+		}
+		total := len([]rune(text))
 
-	if len(pages) == 0 {
-		u.clearImage()
-		u.updateNav()
-		u.setStatus("请输入文本以生成二维码")
-		return
-	}
-	if err := u.showImage(0); err != nil {
-		u.setStatus("生成失败: " + err.Error())
-		return
-	}
-	u.updateNav()
-	if len(pages) > 1 {
-		u.setStatus(fmt.Sprintf("已生成，自动分页共 %d 页", len(pages)))
-	} else {
-		u.setStatus("已生成二维码")
-	}
-	u.scheduleSave(text, p, len(pages))
+		// 仅预渲染第 0 页，其余页按需（翻页时）再渲染
+		var img *image.NRGBA
+		if len(pages) > 0 && !pages[0].Overflow {
+			img, _ = renderPage(pages[0].Text, p)
+		}
+
+		u.mw.Synchronize(func() {
+			u.mu.Lock()
+			if u.genSeq != myGen {
+				u.mu.Unlock()
+				return
+			}
+			if u.curBmp != nil {
+				u.curBmp.Dispose()
+				u.curBmp = nil
+			}
+			u.pages = pages
+			u.pageCount = len(pages)
+			u.totalChars = total
+			u.page = 0
+			u.hasQR = len(pages) > 0
+			u.mu.Unlock()
+
+			if len(pages) == 0 {
+				u.clearImage()
+				u.updateNav()
+				u.setStatus("请输入文本以生成二维码")
+				return
+			}
+			if len(pages) > 0 && pages[0].Overflow {
+				u.clearImage()
+			} else if img != nil {
+				if bmp, berr := walk.NewBitmapFromImage(img); berr == nil {
+					u.curBmp = bmp
+					_ = u.qrView.SetImage(bmp)
+				}
+			}
+			u.updateNav()
+			u.setStatus(u.currentPageStatus(0))
+			u.scheduleSave(text, p, len(pages))
+		})
+	}()
 }
 
-// showImage 渲染第 idx 页并显示到 ImageView。
+// showImage 渲染第 idx 页并显示到 ImageView。Overflow 页（不分页模式下超长）不显示，仅清空。
 func (u *UI) showImage(idx int) error {
 	u.mu.Lock()
 	pages := u.pages
@@ -347,7 +406,12 @@ func (u *UI) showImage(idx int) error {
 	if idx < 0 || idx >= len(pages) {
 		return nil
 	}
-	img, err := renderPage(pages[idx], p)
+	pg := pages[idx]
+	if pg.Overflow {
+		u.clearImage()
+		return nil
+	}
+	img, err := renderPage(pg.Text, p)
 	if err != nil {
 		return err
 	}
@@ -382,6 +446,27 @@ func (u *UI) updateNav() {
 	u.nextBtn.SetEnabled(pg < pc-1)
 }
 
+// currentPageStatus 生成左下角状态栏文案：显示当前页对应的原始文本字符区间。
+func (u *UI) currentPageStatus(idx int) string {
+	u.mu.Lock()
+	pages := u.pages
+	total := u.totalChars
+	u.mu.Unlock()
+	n := len(pages)
+	if n == 0 || idx < 0 || idx >= n {
+		return "请输入文本以生成二维码"
+	}
+	pg := pages[idx]
+	if pg.Overflow {
+		return fmt.Sprintf("第 %d/%d 页 · 当前页文本过长（共 %d 字），请开启右侧\"自动分页\"", idx+1, n, total)
+	}
+	rng := fmt.Sprintf("字符 %d–%d", pg.Start+1, pg.End)
+	if n == 1 {
+		return fmt.Sprintf("已生成二维码 · %s（共 %d 字）", rng, total)
+	}
+	return fmt.Sprintf("自动分页 · 第 %d/%d 页 · %s（共 %d 字）", idx+1, n, rng, total)
+}
+
 // nav 在分页间切换。
 func (u *UI) nav(delta int) {
 	u.mu.Lock()
@@ -407,6 +492,7 @@ func (u *UI) nav(delta int) {
 		return
 	}
 	u.updateNav()
+	u.setStatus(u.currentPageStatus(idx))
 }
 
 // scheduleSave 防抖自动写入历史（700ms 停顿后）。
@@ -468,7 +554,11 @@ func (u *UI) saveCurrentImage() {
 		u.setStatus("暂无可保存的图片")
 		return
 	}
-	img, err := renderPage(pages[pg], p)
+	if pages[pg].Overflow {
+		u.setStatus("当前页文本过长，无法保存图片，请开启右侧\"自动分页\"")
+		return
+	}
+	img, err := renderPage(pages[pg].Text, p)
 	if err != nil {
 		u.setStatus("渲染失败: " + err.Error())
 		return
@@ -532,10 +622,10 @@ func (u *UI) showHistoryDialog() {
 		return
 	}
 	dlg.SetTitle("历史记录")
-	dlg.SetLayout(walk.NewVBoxLayout())
+	dlg.SetLayout(tight(walk.NewVBoxLayout()))
 
 	bar := must(walk.NewComposite(dlg))
-	bar.SetLayout(walk.NewHBoxLayout())
+	bar.SetLayout(tight(walk.NewHBoxLayout()))
 	loadBtn := must(walk.NewPushButton(bar))
 	loadBtn.SetText("加载选中")
 	delBtn := must(walk.NewPushButton(bar))
