@@ -1,0 +1,11 @@
+# Build artifacts (regenerate via `go build -o qrcode-gui.exe .`)
+qrcode-gui.exe
+*.exe
+
+# Local WorkBuddy tooling state
+.workbuddy/
+
+# OS cruft
+Thumbs.db
+ehthumbs.db
+Desktop.ini
