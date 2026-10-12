@@ -2,204 +2,384 @@ package main
 
 import (
 	"fmt"
-	"image/color"
-	"image/png"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
+	"time"
 
-	"github.com/CzaxStudio/proton"
+	"github.com/lxn/walk"
 )
 
-// UI 持有全部界面状态与生成结果。proton 是“即时模式”框架：
-// draw() 每帧被调用，控件状态存放在这里（proton 官方推荐做法）。
-type UI struct {
-	// —— 文本输入（右下）——
-	text proton.Editor
-
-	// —— 生成参数（右上）——
-	sizeNum    proton.NumberState   // 尺寸(px)
-	ecSel      proton.SelectBoxState // 容错级别 L/M/Q/H
-	borderNum  proton.NumberState   // 静区(模块)
-	colorOn    proton.Bool          // 彩色开关（预留彩色二维码能力）
-	fgIn       proton.Editor        // 前景色 hex
-	bgIn       proton.Editor        // 背景色 hex
-	autoPage   proton.Bool          // 自动分页开关
-	charsNum   proton.NumberState   // 每页字符数（手动分页）
-	marker     proton.Bool          // 添加页码标记
-
-	// —— 动作按钮 ——
-	genBtn      proton.Clickable
-	saveBtn     proton.Clickable
-	histBtn     proton.Clickable
-	saveImgBtn  proton.Clickable
-	prevBtn     proton.Clickable
-	nextBtn     proton.Clickable
-	closeHistBtn proton.Clickable
-	clearHistBtn proton.Clickable
-
-	// —— 布局状态 ——
-	split      proton.ResizeSplitState // 左右分栏
-	paramScroll proton.Scrollable     // 参数滚动区
-	histScroll  proton.Scrollable     // 历史列表滚动区
-	histModal   proton.OverlayState   // 历史弹窗
-	histLoad    []proton.Clickable    // 每条历史的“加载”按钮
-	histDel     []proton.Clickable    // 每条历史的“删除”按钮
-
-	// —— 生成结果 ——
-	mu         sync.Mutex
-	pages      []string      // 分页后的各页内容
-	pageCount  int           // 页数
-	page       int           // 当前页索引
-	hasQR      bool          // 是否已有二维码
-	qrOp       proton.ImageOp // 当前页的显示对象（由临时 PNG 加载）
-	qrFile     string        // 当前页二维码的临时 PNG 路径
-	renderSize int           // 当前页渲染像素边长
-	lastKey    string        // 上次生成的输入指纹，用于脏检测
-	status     string        // 状态栏文字
-
-	// —— 历史记录 ——
-	history []HistoryEntry
-
-	// —— 托盘协同 ——
-	ctxMu       sync.Mutex
-	lastCtx     proton.Context
-	showHistory atomic.Bool
-	requestSave atomic.Bool
-}
-
-// NewUI 构造并初始化 UI 的默认状态，同时创建临时目录用于存放当前页二维码 PNG。
-func NewUI() *UI {
-	u := &UI{}
-	dir, err := os.MkdirTemp("", "qrcode-gui")
-	if err == nil {
-		u.qrFile = filepath.Join(dir, "qr.png")
-	} else {
-		u.qrFile = "qr_current.png"
+// must 是 NewXxx 双返回值构造器的便捷包装：创建失败直接 panic（GUI 启动阶段，
+// 控件创建失败属于致命错误，无需恢复）。
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
 	}
-	// 默认参数
-	u.sizeNum.Value = 320
-	u.borderNum.Value = 4
-	u.charsNum.Value = 300
-	u.ecSel.Selected = 1 // 默认容错级别 M
-	u.autoPage.Value = true
-	u.marker.Value = true
-	u.colorOn.Value = false
-	u.fgIn.SetText("#000000")
-	u.bgIn.SetText("#FFFFFF")
-	u.renderSize = 320
-	u.status = "输入文本以生成二维码"
-	return u
+	return v
 }
 
-// setStatus 线程安全地更新状态栏文字。
+// UI 持有界面状态与生成结果。walk 是事件驱动（非即时模式）框架，
+// 控件状态直接保存在 walk 控件里，这里仅放置生成结果与跨控件共享状态。
+type UI struct {
+	mw *walk.MainWindow
+
+	// 左栏
+	qrView      *walk.ImageView
+	curBmp      *walk.Bitmap
+	prevBtn     *walk.PushButton
+	nextBtn     *walk.PushButton
+	saveImgBtn  *walk.PushButton
+	pageLabel   *walk.Label
+	statusLabel *walk.Label
+
+	// 右栏参数
+	ecCombo     *walk.ComboBox
+	borderEdit  *walk.NumberEdit
+	colorChk    *walk.CheckBox
+	fgEdit      *walk.LineEdit
+	bgEdit      *walk.LineEdit
+	autoPageChk *walk.CheckBox
+	charsEdit   *walk.NumberEdit
+	markerChk   *walk.CheckBox
+
+	// 右栏输入
+	textEdit       *walk.TextEdit
+	charCountLabel *walk.Label
+
+	// 历史
+	history   []HistoryEntry
+	histModel *historyModel
+	histTV    *walk.TableView
+
+	// 生成状态（mutex 保护跨 goroutine 访问）
+	mu           sync.Mutex
+	pages        []string
+	pageCount    int
+	page         int
+	hasQR        bool
+	curParams    Params
+	lastKey      string
+	genTimer     *time.Timer
+	saveTimer    *time.Timer
+	savedText    string
+	skipSaveOnce bool
+}
+
+// NewUI 构造 UI 默认状态。
+func NewUI() *UI {
+	return &UI{
+		curParams: defaultParams(),
+	}
+}
+
+// build 命令式构建整个窗口与所有控件，并绑定事件。
+func (u *UI) build() (*walk.MainWindow, error) {
+	mw, err := walk.NewMainWindow()
+	if err != nil {
+		return nil, err
+	}
+	u.mw = mw
+	mw.SetTitle("二维码生成器 · QR Generator")
+	if err := mw.SetSize(walk.Size{Width: 1000, Height: 700}); err != nil {
+		return nil, err
+	}
+	if err := mw.SetMinMaxSize(walk.Size{Width: 760, Height: 560}, walk.Size{}); err != nil {
+		return nil, err
+	}
+	mw.SetLayout(walk.NewHBoxLayout())
+
+	// ===== 主水平分栏：左=二维码，右=参数+输入 =====
+	hsplit := must(walk.NewHSplitter(mw))
+
+	// --- 左栏 ---
+	left := must(walk.NewComposite(hsplit))
+	left.SetLayout(walk.NewVBoxLayout())
+
+	u.qrView = must(walk.NewImageView(left))
+	u.qrView.SetMode(walk.ImageViewModeZoom)
+	u.qrView.SetMargin(8)
+
+	navBar := must(walk.NewComposite(left))
+	navBar.SetLayout(walk.NewHBoxLayout())
+	navBar.SetMinMaxSize(walk.Size{Width: 0, Height: 34}, walk.Size{Width: 0, Height: 34})
+	u.prevBtn = must(walk.NewPushButton(navBar))
+	u.prevBtn.SetText("上一页")
+	u.pageLabel = must(walk.NewLabel(navBar))
+	u.pageLabel.SetText("第 1 / 1 页")
+	u.nextBtn = must(walk.NewPushButton(navBar))
+	u.nextBtn.SetText("下一页")
+	u.saveImgBtn = must(walk.NewPushButton(navBar))
+	u.saveImgBtn.SetText("保存图片")
+
+	u.statusLabel = must(walk.NewLabel(left))
+	u.statusLabel.SetMinMaxSize(walk.Size{Width: 0, Height: 20}, walk.Size{Width: 0, Height: 20})
+	u.statusLabel.SetText("输入文本以生成二维码")
+
+	// --- 右栏（垂直分栏：参数 / 输入）---
+	right := must(walk.NewComposite(hsplit))
+	right.SetLayout(walk.NewVBoxLayout())
+	right.SetMinMaxSize(walk.Size{Width: 300, Height: 0}, walk.Size{Width: 440, Height: 0})
+
+	vsplit := must(walk.NewVSplitter(right))
+
+	// 参数区（可滚动）
+	paramPane := must(walk.NewComposite(vsplit))
+	paramPane.SetLayout(walk.NewVBoxLayout())
+	paramPane.SetMinMaxSize(walk.Size{Width: 0, Height: 200}, walk.Size{Width: 0, Height: 440})
+	paramScroll := must(walk.NewScrollView(paramPane))
+	paramScroll.SetLayout(walk.NewVBoxLayout())
+
+	title := must(walk.NewLabel(paramScroll))
+	title.SetText("生成参数")
+
+	ecRow := must(walk.NewComposite(paramScroll))
+	ecRow.SetLayout(walk.NewHBoxLayout())
+	ecLbl := must(walk.NewLabel(ecRow))
+	ecLbl.SetText("容错级别")
+	u.ecCombo = must(walk.NewComboBox(ecRow))
+	_ = u.ecCombo.SetModel([]string{"L", "M", "Q", "H"})
+	_ = u.ecCombo.SetCurrentIndex(1)
+
+	borderRow := must(walk.NewComposite(paramScroll))
+	borderRow.SetLayout(walk.NewHBoxLayout())
+	bLbl := must(walk.NewLabel(borderRow))
+	bLbl.SetText("静区/边距(模块)")
+	u.borderEdit = must(walk.NewNumberEdit(borderRow))
+	_ = u.borderEdit.SetRange(0, 16)
+	_ = u.borderEdit.SetValue(4)
+	_ = u.borderEdit.SetSpinButtonsVisible(true)
+
+	u.colorChk = must(walk.NewCheckBox(paramScroll))
+	u.colorChk.SetText("启用彩色二维码（预留）")
+	colorPane := must(walk.NewComposite(paramScroll))
+	colorPane.SetLayout(walk.NewHBoxLayout())
+	fgLbl := must(walk.NewLabel(colorPane))
+	fgLbl.SetText("前景色")
+	u.fgEdit = must(walk.NewLineEdit(colorPane))
+	u.fgEdit.SetText("#000000")
+	bgLbl := must(walk.NewLabel(colorPane))
+	bgLbl.SetText("背景色")
+	u.bgEdit = must(walk.NewLineEdit(colorPane))
+	u.bgEdit.SetText("#FFFFFF")
+	colorPane.SetVisible(false)
+
+	u.autoPageChk = must(walk.NewCheckBox(paramScroll))
+	u.autoPageChk.SetText("自动分页（超出单码容量自动拆分）")
+	u.autoPageChk.SetChecked(true)
+	charsPane := must(walk.NewComposite(paramScroll))
+	charsPane.SetLayout(walk.NewHBoxLayout())
+	cLbl := must(walk.NewLabel(charsPane))
+	cLbl.SetText("每页字符数")
+	u.charsEdit = must(walk.NewNumberEdit(charsPane))
+	_ = u.charsEdit.SetRange(1, 4000)
+	_ = u.charsEdit.SetValue(300)
+	_ = u.charsEdit.SetSpinButtonsVisible(true)
+	charsPane.SetVisible(false)
+
+	u.markerChk = must(walk.NewCheckBox(paramScroll))
+	u.markerChk.SetText("添加页码标记 [p/N]")
+	u.markerChk.SetChecked(false)
+
+	histBtn := must(walk.NewPushButton(paramScroll))
+	histBtn.SetText("管理历史记录")
+	hint := must(walk.NewLabel(paramScroll))
+	hint.SetText("输入后稍作停顿即自动存入历史")
+
+	// 输入区
+	inputPane := must(walk.NewComposite(vsplit))
+	inputPane.SetLayout(walk.NewVBoxLayout())
+	inLbl := must(walk.NewLabel(inputPane))
+	inLbl.SetText("输入文本")
+	inLbl.SetMinMaxSize(walk.Size{Width: 0, Height: 20}, walk.Size{Width: 0, Height: 20})
+	u.textEdit = must(walk.NewTextEdit(inputPane))
+	u.charCountLabel = must(walk.NewLabel(inputPane))
+	u.charCountLabel.SetText("字符数: 0")
+	u.charCountLabel.SetMinMaxSize(walk.Size{Width: 0, Height: 20}, walk.Size{Width: 0, Height: 20})
+
+	// ===== 事件绑定 =====
+	u.textEdit.TextChanged().Attach(func() {
+		u.updateCharCount()
+		u.scheduleGenerate()
+	})
+	u.ecCombo.CurrentIndexChanged().Attach(u.scheduleGenerate)
+	u.borderEdit.ValueChanged().Attach(u.scheduleGenerate)
+	u.colorChk.CheckedChanged().Attach(func() {
+		colorPane.SetVisible(u.colorChk.Checked())
+		u.scheduleGenerate()
+	})
+	u.fgEdit.TextChanged().Attach(u.scheduleGenerate)
+	u.bgEdit.TextChanged().Attach(u.scheduleGenerate)
+	u.autoPageChk.CheckedChanged().Attach(func() {
+		charsPane.SetVisible(!u.autoPageChk.Checked())
+		u.scheduleGenerate()
+	})
+	u.charsEdit.ValueChanged().Attach(u.scheduleGenerate)
+	u.markerChk.CheckedChanged().Attach(u.scheduleGenerate)
+
+	u.prevBtn.Clicked().Attach(func() { u.nav(-1) })
+	u.nextBtn.Clicked().Attach(func() { u.nav(1) })
+	u.saveImgBtn.Clicked().Attach(u.saveCurrentImage)
+	histBtn.Clicked().Attach(u.showHistoryDialog)
+
+	// 初始状态
+	u.updateCharCount()
+	u.updateNav()
+	u.setStatus("输入文本以生成二维码")
+	return mw, nil
+}
+
+// updateCharCount 刷新字符计数。
+func (u *UI) updateCharCount() {
+	u.charCountLabel.SetText(fmt.Sprintf("字符数: %d", len([]rune(u.textEdit.Text()))))
+}
+
+// setStatus 线程安全地更新状态栏（调用方均在 UI 线程）。
 func (u *UI) setStatus(s string) {
-	u.mu.Lock()
-	u.status = s
-	u.mu.Unlock()
+	if u.statusLabel == nil {
+		return
+	}
+	u.statusLabel.SetText(s)
 }
 
 // readParams 从界面控件读取当前生成参数。
 func (u *UI) readParams() Params {
 	ec := "M"
 	opts := []string{"L", "M", "Q", "H"}
-	if u.ecSel.Selected >= 0 && u.ecSel.Selected < len(opts) {
-		ec = opts[u.ecSel.Selected]
+	idx := u.ecCombo.CurrentIndex()
+	if idx >= 0 && idx < len(opts) {
+		ec = opts[idx]
 	}
-	size := int(u.sizeNum.Value)
-	if size < 16 {
-		size = 16
-	}
-	border := int(u.borderNum.Value)
+	border := int(u.borderEdit.Value())
 	if border < 0 {
 		border = 0
 	}
-	chars := int(u.charsNum.Value)
+	chars := int(u.charsEdit.Value())
 	if chars < 1 {
 		chars = 1
 	}
-	fg := strings.TrimSpace(u.fgIn.Text())
+	fg := strings.TrimSpace(u.fgEdit.Text())
 	if fg == "" {
 		fg = "#000000"
 	}
-	bg := strings.TrimSpace(u.bgIn.Text())
+	bg := strings.TrimSpace(u.bgEdit.Text())
 	if bg == "" {
 		bg = "#FFFFFF"
 	}
 	return Params{
-		Size: size, ECLevel: ec, Border: border,
-		ColorMode: u.colorOn.Value, FgColor: fg, BgColor: bg,
-		AutoPage: u.autoPage.Value, CharsPerPage: chars, PageMarker: u.marker.Value,
+		ECLevel:      ec,
+		Border:       border,
+		ColorMode:    u.colorChk.Checked(),
+		FgColor:      fg,
+		BgColor:      bg,
+		AutoPage:     u.autoPageChk.Checked(),
+		CharsPerPage: chars,
+		PageMarker:   u.markerChk.Checked(),
 	}
 }
 
-// generate 根据文本与参数生成二维码。save=true 时会写入历史记录。
-func (u *UI) generate(text string, p Params, save bool) {
-	if strings.TrimSpace(text) == "" {
-		u.mu.Lock()
-		u.hasQR = false
-		u.pages = nil
-		u.pageCount = 0
-		u.page = 0
-		u.status = "请输入文本以生成二维码"
+// fingerprint 生成输入指纹用于脏检测。
+func (u *UI) fingerprint(text string, p Params) string {
+	return fmt.Sprintf("%s|%s|%d|%v|%s|%s|%v|%d|%v",
+		text, p.ECLevel, p.Border, p.ColorMode, p.FgColor, p.BgColor, p.AutoPage, p.CharsPerPage, p.PageMarker)
+}
+
+// scheduleGenerate 防抖重新生成二维码（120ms）。
+func (u *UI) scheduleGenerate() {
+	if u.genTimer != nil {
+		u.genTimer.Stop()
+	}
+	u.genTimer = time.AfterFunc(120*time.Millisecond, func() {
+		u.mw.Synchronize(u.regenerate)
+	})
+}
+
+// regenerate 重新分页并渲染当前页。
+func (u *UI) regenerate() {
+	text := u.textEdit.Text()
+	p := u.readParams()
+	key := u.fingerprint(text, p)
+	u.mu.Lock()
+	if key == u.lastKey {
 		u.mu.Unlock()
 		return
 	}
+	u.lastKey = key
+	u.curParams = p
+	u.mu.Unlock()
+
 	pages, err := splitPages(text, p)
 	if err != nil {
 		u.setStatus("分页失败: " + err.Error())
-		return
-	}
-	if len(pages) == 0 {
-		u.setStatus("文本为空")
-		return
-	}
-	if err := u.renderAndShow(0, pages, p); err != nil {
-		u.setStatus("生成失败: " + err.Error())
 		return
 	}
 	u.mu.Lock()
 	u.pages = pages
 	u.pageCount = len(pages)
 	u.page = 0
-	u.hasQR = true
+	u.hasQR = len(pages) > 0
 	u.mu.Unlock()
 
-	if save {
-		u.addHistory(text, p, len(pages))
-		u.setStatus(fmt.Sprintf("已生成并保存到历史（共 %d 页）", len(pages)))
-	} else if len(pages) > 1 {
+	if len(pages) == 0 {
+		u.clearImage()
+		u.updateNav()
+		u.setStatus("请输入文本以生成二维码")
+		return
+	}
+	if err := u.showImage(0); err != nil {
+		u.setStatus("生成失败: " + err.Error())
+		return
+	}
+	u.updateNav()
+	if len(pages) > 1 {
 		u.setStatus(fmt.Sprintf("已生成，自动分页共 %d 页", len(pages)))
 	} else {
 		u.setStatus("已生成二维码")
 	}
+	u.scheduleSave(text, p, len(pages))
 }
 
-// renderAndShow 渲染指定页并加载为显示对象。
-func (u *UI) renderAndShow(idx int, pages []string, p Params) error {
+// showImage 渲染第 idx 页并显示到 ImageView。
+func (u *UI) showImage(idx int) error {
+	u.mu.Lock()
+	pages := u.pages
+	p := u.curParams
+	u.mu.Unlock()
+	if idx < 0 || idx >= len(pages) {
+		return nil
+	}
 	img, err := renderPage(pages[idx], p)
 	if err != nil {
 		return err
 	}
-	f, err := os.Create(u.qrFile)
+	bmp, err := walk.NewBitmapFromImage(img)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	if err := png.Encode(f, img); err != nil {
-		return err
+	if u.curBmp != nil {
+		u.curBmp.Dispose()
 	}
-	op, err := proton.LoadImage(u.qrFile)
-	if err != nil {
-		return err
+	u.curBmp = bmp
+	return u.qrView.SetImage(bmp)
+}
+
+// clearImage 清空当前二维码显示。
+func (u *UI) clearImage() {
+	if u.curBmp != nil {
+		u.curBmp.Dispose()
+		u.curBmp = nil
 	}
+	_ = u.qrView.SetImage(nil)
+}
+
+// updateNav 刷新翻页按钮与页码。
+func (u *UI) updateNav() {
 	u.mu.Lock()
-	u.qrOp = op
-	u.renderSize = img.Bounds().Dx()
+	pc := u.pageCount
+	pg := u.page
 	u.mu.Unlock()
-	return nil
+	u.pageLabel.SetText(fmt.Sprintf("第 %d / %d 页", pg+1, maxInt(pc, 1)))
+	u.prevBtn.SetEnabled(pg > 0)
+	u.nextBtn.SetEnabled(pg < pc-1)
 }
 
 // nav 在分页间切换。
@@ -221,22 +401,50 @@ func (u *UI) nav(delta int) {
 		return
 	}
 	u.page = idx
-	pages := u.pages
 	u.mu.Unlock()
-
-	if idx >= 0 && idx < len(pages) {
-		p := u.readParams()
-		if err := u.renderAndShow(idx, pages, p); err != nil {
-			u.setStatus("渲染失败: " + err.Error())
-		}
+	if err := u.showImage(idx); err != nil {
+		u.setStatus("渲染失败: " + err.Error())
+		return
 	}
+	u.updateNav()
 }
 
-// saveCurrent 保存当前已生成结果到历史（不重新生成）。
+// scheduleSave 防抖自动写入历史（700ms 停顿后）。
+func (u *UI) scheduleSave(text string, p Params, pages int) {
+	if u.saveTimer != nil {
+		u.saveTimer.Stop()
+	}
+	u.saveTimer = time.AfterFunc(700*time.Millisecond, func() {
+		u.mw.Synchronize(func() {
+			u.maybeSaveHistory(text, p, pages)
+		})
+	})
+}
+
+// maybeSaveHistory 去重后写入历史。
+func (u *UI) maybeSaveHistory(text string, p Params, pages int) {
+	u.mu.Lock()
+	if u.skipSaveOnce {
+		u.skipSaveOnce = false
+		u.savedText = text
+		u.mu.Unlock()
+		return
+	}
+	if strings.TrimSpace(text) == "" || text == u.savedText {
+		u.mu.Unlock()
+		return
+	}
+	u.savedText = text
+	u.mu.Unlock()
+	u.addHistory(text, p, pages)
+	u.setStatus(fmt.Sprintf("已保存到历史（共 %d 页）", pages))
+}
+
+// saveCurrent 把当前已生成结果存入历史（不重新生成）。
 func (u *UI) saveCurrent() {
 	u.mu.Lock()
 	has := u.hasQR
-	text := u.text.Text()
+	text := u.textEdit.Text()
 	pages := u.pageCount
 	u.mu.Unlock()
 	if !has || strings.TrimSpace(text) == "" {
@@ -248,299 +456,173 @@ func (u *UI) saveCurrent() {
 	u.setStatus("已保存到历史记录")
 }
 
-// saveCurrentImage 把当前页二维码 PNG 复制到 ./qr_output/ 目录。
+// saveCurrentImage 把当前页二维码保存为用户指定路径的 PNG。
 func (u *UI) saveCurrentImage() {
 	u.mu.Lock()
 	has := u.hasQR
-	qrFile := u.qrFile
 	pg := u.page
+	pages := u.pages
+	p := u.curParams
 	u.mu.Unlock()
-	if !has {
+	if !has || pg < 0 || pg >= len(pages) {
 		u.setStatus("暂无可保存的图片")
 		return
 	}
-	if err := os.MkdirAll("qr_output", 0o755); err != nil {
-		u.setStatus("创建目录失败: " + err.Error())
-		return
-	}
-	out := filepath.Join("qr_output", fmt.Sprintf("qrcode_page_%d.png", pg+1))
-	data, err := os.ReadFile(qrFile)
+	img, err := renderPage(pages[pg], p)
 	if err != nil {
-		u.setStatus("读取失败: " + err.Error())
+		u.setStatus("渲染失败: " + err.Error())
 		return
 	}
-	if err := os.WriteFile(out, data, 0o644); err != nil {
+	dlg := new(walk.FileDialog)
+	dlg.Title = "保存二维码图片"
+	dlg.Filter = "PNG 图片 (*.png)|*.png"
+	dlg.FilePath = fmt.Sprintf("qrcode_page_%d.png", pg+1)
+	if ok, err := dlg.ShowSave(u.mw); err != nil {
+		u.setStatus("保存失败: " + err.Error())
+		return
+	} else if !ok {
+		return
+	}
+	if err := savePNG(dlg.FilePath, img); err != nil {
 		u.setStatus("保存失败: " + err.Error())
 		return
 	}
-	u.setStatus("已保存: " + out)
+	u.setStatus("已保存: " + dlg.FilePath)
 }
 
-// invalidate 通过缓存的 Context 请求一次重绘（供托盘线程调用）。
-func (u *UI) invalidate() {
-	u.ctxMu.Lock()
-	c := u.lastCtx
-	u.ctxMu.Unlock()
-	if c != nil {
-		c.Invalidate()
+// historyRow 是历史表格的一行展示数据。
+type historyRow struct {
+	Time    string
+	Preview string
+	Params  string
+	Pages   int
+}
+
+// historyModel 实现 walk.TableModel 接口（自定义 Value，非反射）。
+type historyModel struct {
+	walk.TableModelBase
+	rows []historyRow
+}
+
+func (m *historyModel) RowCount() int { return len(m.rows) }
+
+func (m *historyModel) Value(row, col int) interface{} {
+	if row < 0 || row >= len(m.rows) {
+		return nil
 	}
-}
-
-// draw 是 proton 每帧调用的绘制函数，也是整个界面的入口。
-func (u *UI) draw(win proton.Context) {
-	// 记录 Context 以便托盘线程触发重绘
-	u.ctxMu.Lock()
-	u.lastCtx = win
-	u.ctxMu.Unlock()
-
-	// 处理来自托盘线程的请求（在绘制线程内执行，避免跨线程竞争）
-	if u.requestSave.Load() {
-		u.requestSave.Store(false)
-		u.saveCurrent()
+	r := m.rows[row]
+	switch col {
+	case 0:
+		return r.Time
+	case 1:
+		return r.Preview
+	case 2:
+		return r.Params
+	case 3:
+		return r.Pages
 	}
-	if u.showHistory.Load() {
-		u.showHistory.Store(false)
-		u.histModal.Show()
+	return nil
+}
+
+// showHistoryDialog 弹出历史记录管理对话框。
+func (u *UI) showHistoryDialog() {
+	dlg, err := walk.NewDialog(u.mw)
+	if err != nil {
+		u.setStatus("打开历史失败: " + err.Error())
+		return
 	}
+	dlg.SetTitle("历史记录")
+	dlg.SetLayout(walk.NewVBoxLayout())
 
-	// 读取当前输入，做脏检测决定是否重新生成
-	text := u.text.Text()
-	p := u.readParams()
-	key := fmt.Sprintf("%s|%d|%s|%d|%v|%s|%s|%v|%d|%v",
-		text, p.Size, p.ECLevel, p.Border, p.ColorMode, p.FgColor, p.BgColor, p.AutoPage, p.CharsPerPage, p.PageMarker)
-	if key != u.lastKey {
-		u.lastKey = key
-		u.generate(text, p, false)
-	}
+	bar := must(walk.NewComposite(dlg))
+	bar.SetLayout(walk.NewHBoxLayout())
+	loadBtn := must(walk.NewPushButton(bar))
+	loadBtn.SetText("加载选中")
+	delBtn := must(walk.NewPushButton(bar))
+	delBtn.SetText("删除选中")
+	clearBtn := must(walk.NewPushButton(bar))
+	clearBtn.SetText("清空")
+	closeBtn := must(walk.NewPushButton(bar))
+	closeBtn.SetText("关闭")
 
-	// 主布局：左侧二维码，右侧参数+输入
-	proton.ResizeSplit(win, &u.split, 0.45, u.leftPane, u.rightPane)
+	tv := must(walk.NewTableView(dlg))
+	tv.SetLastColumnStretched(true)
+	c0 := walk.NewTableViewColumn()
+	c0.SetName("Time")
+	_ = c0.SetTitle("时间")
+	_ = c0.SetWidth(150)
+	tv.Columns().Add(c0)
+	c1 := walk.NewTableViewColumn()
+	c1.SetName("Preview")
+	_ = c1.SetTitle("预览")
+	_ = c1.SetWidth(280)
+	tv.Columns().Add(c1)
+	c2 := walk.NewTableViewColumn()
+	c2.SetName("Params")
+	_ = c2.SetTitle("参数")
+	_ = c2.SetWidth(180)
+	tv.Columns().Add(c2)
+	c3 := walk.NewTableViewColumn()
+	c3.SetName("Pages")
+	_ = c3.SetTitle("页数")
+	_ = c3.SetWidth(50)
+	tv.Columns().Add(c3)
+	u.histTV = tv
+	u.populateHistory(tv)
 
-	// 历史管理弹窗（仅当 histModal.Visible 时绘制）
-	proton.Overlay(win, &u.histModal, u.historyContent)
-}
-
-// leftPane 左栏：居中的二维码 + 翻页/状态/保存。
-func (u *UI) leftPane(win proton.Context) {
-	proton.GrowColumn(win,
-		proton.GrowItem(win, func(win proton.Context) {
-			proton.Center(win, func(win proton.Context) {
-				u.mu.Lock()
-				has := u.hasQR
-				op := u.qrOp
-				rs := u.renderSize
-				u.mu.Unlock()
-				if has {
-					disp := float32(rs)
-					if disp > 360 {
-						disp = 360
-					}
-					if disp <= 0 {
-						disp = 320
-					}
-					proton.Image(win, op, disp, disp)
-				} else {
-					proton.Muted(win, "在右侧输入文本以生成二维码")
-				}
-			})
-		}),
-		proton.FixedItem(win, func(win proton.Context) {
-			u.mu.Lock()
-			pg := u.page
-			pc := u.pageCount
-			st := u.status
-			u.mu.Unlock()
-			proton.Gap(win, 8)
-			proton.Row(win,
-				func(win proton.Context) {
-					if proton.Button(win, &u.prevBtn, "‹ 上一页") {
-						u.nav(-1)
-					}
-				},
-				func(win proton.Context) {
-					proton.Caption(win, fmt.Sprintf("第 %d / %d 页", pg+1, maxInt(pc, 1)))
-				},
-				func(win proton.Context) {
-					if proton.Button(win, &u.nextBtn, "下一页 ›") {
-						u.nav(1)
-					}
-				},
-			)
-			proton.Gap(win, 4)
-			proton.Caption(win, st)
-			proton.Gap(win, 6)
-			proton.Row(win, func(win proton.Context) {
-				if proton.Button(win, &u.saveImgBtn, "保存当前页图片") {
-					u.saveCurrentImage()
-				}
-			})
-		}),
-	)
-}
-
-// rightPane 右栏：上=参数(可滚动)，下=文本输入(固定)。
-func (u *UI) rightPane(win proton.Context) {
-	proton.GrowColumn(win,
-		proton.GrowItem(win, func(win proton.Context) {
-			proton.Scroll(win, &u.paramScroll, u.paramsContent)
-		}),
-		proton.FixedItem(win, u.inputContent),
-	)
-}
-
-// paramsContent 右上：生成参数面板。
-func (u *UI) paramsContent(win proton.Context) {
-	proton.Pad(win, 12, func(win proton.Context) {
-		proton.H3(win, "生成参数")
-		proton.Gap(win, 8)
-
-		proton.LabeledDivider(win, "基本设置")
-		proton.Gap(win, 6)
-		u.rowLabelControl(win, "尺寸 (px)",
-			proton.FixedItem(win, func(win proton.Context) {
-				proton.NumberInput(win, &u.sizeNum, 64, 1024, 16)
-			}))
-		u.rowLabelControl(win, "容错级别",
-			proton.GrowItem(win, func(win proton.Context) {
-				proton.SelectBox(win, &u.ecSel, []string{"L", "M", "Q", "H"})
-			}))
-		u.rowLabelControl(win, "静区/边距 (模块)",
-			proton.FixedItem(win, func(win proton.Context) {
-				proton.NumberInput(win, &u.borderNum, 0, 16, 1)
-			}))
-
-		proton.Gap(win, 8)
-		proton.LabeledDivider(win, "彩色二维码（预留）")
-		proton.Gap(win, 6)
-		proton.Toggle(win, &u.colorOn, "启用彩色二维码")
-		proton.If(win, u.colorOn.Value, func(win proton.Context) {
-			u.rowLabelControl(win, "前景色",
-				proton.GrowItem(win, func(win proton.Context) {
-					proton.Input(win, &u.fgIn, "#000000")
-				}))
-			u.rowLabelControl(win, "背景色",
-				proton.GrowItem(win, func(win proton.Context) {
-					proton.Input(win, &u.bgIn, "#FFFFFF")
-				}))
-		})
-
-		proton.Gap(win, 8)
-		proton.LabeledDivider(win, "分页设置")
-		proton.Gap(win, 6)
-		proton.Toggle(win, &u.autoPage, "自动分页（超出单码容量自动拆分多页）")
-		proton.If(win, !u.autoPage.Value, func(win proton.Context) {
-			u.rowLabelControl(win, "每页字符数",
-				proton.FixedItem(win, func(win proton.Context) {
-					proton.NumberInput(win, &u.charsNum, 50, 4000, 50)
-				}))
-		})
-		proton.Checkbox(win, &u.marker, "添加页码标记 [p/N]")
-
-		proton.Gap(win, 10)
-		proton.Row(win,
-			func(win proton.Context) {
-				if proton.Button(win, &u.genBtn, "生成并保存历史") {
-					p := u.readParams()
-					u.generate(u.text.Text(), p, true)
-				}
-			},
-			func(win proton.Context) {
-				if proton.Button(win, &u.saveBtn, "仅保存历史") {
-					u.saveCurrent()
-				}
-			},
-		)
-		proton.Gap(win, 8)
-		if proton.Button(win, &u.histBtn, "管理历史记录") {
-			u.histModal.Show()
+	loadBtn.Clicked().Attach(func() {
+		idx := tv.CurrentIndex()
+		if idx < 0 {
+			return
 		}
+		u.loadHistory(idx)
+		dlg.Accept()
 	})
-}
-
-// rowLabelControl 一行：左侧标签 + 右侧控件（控件用 GrowRow 的 FlexItem 控制伸缩）。
-func (u *UI) rowLabelControl(win proton.Context, label string, control proton.FlexItem) {
-	proton.GrowRow(win,
-		proton.FixedItem(win, func(win proton.Context) {
-			proton.Label(win, label)
-		}),
-		control,
-	)
-	proton.Gap(win, 8)
-}
-
-// inputContent 右下：文本输入 + 字数统计。
-func (u *UI) inputContent(win proton.Context) {
-	proton.Pad(win, 12, func(win proton.Context) {
-		proton.Label(win, "输入文本")
-		proton.Gap(win, 4)
-		proton.TextArea(win, &u.text, "在此输入要生成二维码的文本…")
-		proton.Gap(win, 4)
-		proton.Caption(win, fmt.Sprintf("字符数: %d", len([]rune(u.text.Text()))))
+	delBtn.Clicked().Attach(func() {
+		idx := tv.CurrentIndex()
+		if idx < 0 {
+			return
+		}
+		u.deleteHistory(idx)
+		u.populateHistory(tv)
 	})
+	clearBtn.Clicked().Attach(func() {
+		u.clearHistory()
+		u.populateHistory(tv)
+	})
+	closeBtn.Clicked().Attach(func() {
+		dlg.Cancel()
+	})
+	tv.ItemActivated().Attach(func() {
+		idx := tv.CurrentIndex()
+		if idx < 0 {
+			return
+		}
+		u.loadHistory(idx)
+		dlg.Accept()
+	})
+
+	dlg.SetMinMaxSize(walk.Size{Width: 720, Height: 480}, walk.Size{})
+	dlg.Run()
 }
 
-// historyContent 历史管理弹窗内容。
-func (u *UI) historyContent(win proton.Context) {
-	cardBg := color.NRGBA{R: 0x1e, G: 0x1e, B: 0x2e, A: 255}
-	proton.MaxWidth(win, 620, func(win proton.Context) {
-		proton.Card(win, cardBg, 12, 20, func(win proton.Context) {
-			proton.H3(win, "历史记录")
-			proton.Gap(win, 6)
-			u.mu.Lock()
-			hist := u.history
-			u.mu.Unlock()
-			if len(hist) == 0 {
-				proton.Muted(win, "暂无历史记录")
-			} else {
-				u.ensureHistBtns(len(hist))
-				proton.List(win, &u.histScroll, len(hist), func(win proton.Context, i int) {
-					e := hist[i]
-					proton.GrowRow(win,
-						proton.GrowItem(win, func(win proton.Context) {
-							proton.Column(win,
-								func(win proton.Context) { proton.Caption(win, e.TimeStr()) },
-								func(win proton.Context) { proton.Label(win, previewOr(e.Preview)) },
-								func(win proton.Context) {
-									proton.Caption(win, fmt.Sprintf("参数: %s / %dpx / 边距%d / %d页", e.Params.ECLevel, e.Params.Size, e.Params.Border, e.Pages))
-								},
-							)
-						}),
-						proton.FixedItem(win, func(win proton.Context) {
-							if proton.Button(win, &u.histLoad[i], "加载") {
-								u.loadHistory(i)
-							}
-						}),
-						proton.FixedItem(win, func(win proton.Context) {
-							if proton.Button(win, &u.histDel[i], "删除") {
-								u.deleteHistory(i)
-							}
-						}),
-					)
-					proton.Divider(win)
-				})
-			}
-			proton.Gap(win, 10)
-			proton.Row(win,
-				func(win proton.Context) {
-					if proton.Button(win, &u.clearHistBtn, "清空历史") {
-						u.clearHistory()
-					}
-				},
-				func(win proton.Context) {
-					if proton.Button(win, &u.closeHistBtn, "关闭") {
-						u.histModal.Hide()
-					}
-				},
-			)
+// populateHistory 把当前历史填充到表格。
+func (u *UI) populateHistory(tv *walk.TableView) {
+	u.mu.Lock()
+	hist := u.history
+	u.mu.Unlock()
+	rows := make([]historyRow, 0, len(hist))
+	for _, e := range hist {
+		rows = append(rows, historyRow{
+			Time:    e.TimeStr(),
+			Preview: previewOr(e.Preview),
+			Params:  fmt.Sprintf("%s / 边距%d / %d页", e.Params.ECLevel, e.Params.Border, e.Pages),
+			Pages:   e.Pages,
 		})
-	})
-}
-
-func previewOr(s string) string {
-	if s == "" {
-		return "(空)"
 	}
-	return s
+	m := &historyModel{rows: rows}
+	u.histModel = m
+	tv.SetModel(m)
 }
 
 func maxInt(a, b int) int {
@@ -548,4 +630,11 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func previewOr(s string) string {
+	if s == "" {
+		return "(空)"
+	}
+	return s
 }

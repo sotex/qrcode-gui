@@ -15,7 +15,6 @@ import (
 // Params 保存一次二维码生成所需的全部参数。
 // 同时用于历史记录的回放，因此所有字段都必须是可 JSON 序列化的基本类型。
 type Params struct {
-	Size         int    // 输出边长（像素），内部会向下取整到模块整数倍
 	ECLevel      string // 容错级别：L / M / Q / H
 	Border       int    // 静区（quiet zone）宽度，单位：模块
 	ColorMode    bool   // 是否启用彩色（预留彩色二维码能力，默认 false = 黑白）
@@ -28,7 +27,7 @@ type Params struct {
 
 func defaultParams() Params {
 	return Params{
-		Size: 320, ECLevel: "M", Border: 4,
+		ECLevel: "M", Border: 4,
 		ColorMode: false, FgColor: "#000000", BgColor: "#FFFFFF",
 		AutoPage: true, CharsPerPage: 300, PageMarker: true,
 	}
@@ -100,12 +99,18 @@ func renderPage(text string, p Params) (*image.NRGBA, error) {
 	}
 
 	total := n + 2*p.Border
-	cell := 1
-	if p.Size > 0 {
-		cell = p.Size / total
-		if cell < 1 {
-			cell = 1
+	// 自适应渲染分辨率：目标边长约 1200px，保证在左侧显示区缩放下足够清晰；
+	// 单模块像素下限 2、上限 40，避免过小模糊或过大浪费内存。
+	cell := 4
+	if total > 0 {
+		c := 1200 / total
+		if c < 2 {
+			c = 2
 		}
+		if c > 40 {
+			c = 40
+		}
+		cell = c
 	}
 	side := total * cell
 	img := image.NewNRGBA(image.Rect(0, 0, side, side))

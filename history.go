@@ -7,18 +7,16 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/CzaxStudio/proton"
 )
 
 // HistoryEntry 单条历史记录。
 type HistoryEntry struct {
-	ID      string  `json:"id"`
-	Time    int64   `json:"time"`    // Unix 秒
-	Text    string  `json:"text"`    // 原始输入文本
-	Params  Params  `json:"params"`  // 生成参数（用于回放）
-	Pages   int     `json:"pages"`   // 分页数量
-	Preview string  `json:"preview"` // 文本预览
+	ID      string `json:"id"`
+	Time    int64  `json:"time"`    // Unix 秒
+	Text    string `json:"text"`    // 原始输入文本
+	Params  Params `json:"params"`  // 生成参数（用于回放）
+	Pages   int    `json:"pages"`   // 分页数量
+	Preview string `json:"preview"` // 文本预览
 }
 
 // TimeStr 返回可读的时间字符串。
@@ -115,7 +113,7 @@ func (u *UI) clearHistory() {
 	u.setStatus("已清空历史记录")
 }
 
-// loadHistory 把第 i 条记录的内容与参数回填到界面，并强制重新生成。
+// loadHistory 把第 i 条记录回填到界面控件，借助各控件的 Changed 事件自动触发重新生成。
 func (u *UI) loadHistory(i int) {
 	u.mu.Lock()
 	if i < 0 || i >= len(u.history) {
@@ -126,39 +124,26 @@ func (u *UI) loadHistory(i int) {
 	params := e.Params
 	u.mu.Unlock()
 
-	u.text.SetText(e.Text)
-	u.sizeNum.Value = float64(params.Size)
-	idx := 1
 	opts := []string{"L", "M", "Q", "H"}
+	idx := 1
 	for k, v := range opts {
 		if v == params.ECLevel {
 			idx = k
 		}
 	}
-	u.ecSel.Selected = idx
-	u.borderNum.Value = float64(params.Border)
-	u.colorOn.Value = params.ColorMode
-	u.fgIn.SetText(params.FgColor)
-	u.bgIn.SetText(params.BgColor)
-	u.autoPage.Value = params.AutoPage
-	u.charsNum.Value = float64(params.CharsPerPage)
-	u.marker.Value = params.PageMarker
+	u.ecCombo.SetCurrentIndex(idx)
+	u.borderEdit.SetValue(float64(params.Border))
+	u.colorChk.SetChecked(params.ColorMode)
+	u.fgEdit.SetText(params.FgColor)
+	u.bgEdit.SetText(params.BgColor)
+	u.autoPageChk.SetChecked(params.AutoPage)
+	u.charsEdit.SetValue(float64(params.CharsPerPage))
+	u.markerChk.SetChecked(params.PageMarker)
+	u.textEdit.SetText(e.Text)
 
-	u.histModal.Hide()
-	u.lastKey = "" // 触发下一帧重新生成
+	u.lastKey = ""        // 强制下一轮重新生成
+	u.skipSaveOnce = true // 回填内容不重复写入历史
 	u.setStatus("已加载历史记录")
-}
-
-// ensureHistBtns 保证历史列表的加载/删除按钮切片足够长。
-func (u *UI) ensureHistBtns(n int) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	for len(u.histLoad) < n {
-		u.histLoad = append(u.histLoad, proton.Clickable{})
-	}
-	for len(u.histDel) < n {
-		u.histDel = append(u.histDel, proton.Clickable{})
-	}
 }
 
 // previewOf 生成历史预览：取前 40 个字符，换行替换为空格。

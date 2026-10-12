@@ -5,6 +5,9 @@ qrcode-gui.exe
 # Local WorkBuddy tooling state
 .workbuddy/
 
+# Vendored GUI library (replaced by github.com/lxn/walk)
+third_party/
+
 # OS cruft
 Thumbs.db
 ehthumbs.db
