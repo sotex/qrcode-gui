@@ -97,6 +97,15 @@ func setupTray(u *UI, mw *walk.MainWindow) error {
 	}
 	ni.SetToolTip("二维码生成器")
 	ni.SetVisible(true)
+
+	// 点击窗口关闭按钮（X）不退出程序，而是最小化到托盘。
+	// 只在托盘右键“退出”时通过 os.Exit(0) 终止进程，该路径不会触发 Closing 事件。
+	// 注：Closing 处理器在 UI 线程（WM_CLOSE）中同步调用，故可直接 Hide。
+	mw.Closing().Attach(func(canceled *bool, _ walk.CloseReason) {
+		*canceled = true // 否决关闭，避免程序退出
+		mw.Hide()        // 仅隐藏窗口，托盘图标保持运行
+	})
+
 	ni.MouseUp().Attach(func(x, y int, button walk.MouseButton) {
 		if button == walk.LeftButton {
 			mw.Synchronize(func() {
