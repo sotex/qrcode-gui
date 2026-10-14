@@ -3,7 +3,6 @@
 package main
 
 import (
-	"fmt"
 	"image"
 	"image/color"
 	"os"
@@ -27,7 +26,8 @@ func main() {
 	u := NewUI()
 	mw, err := u.build()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "初始化失败: %v\n", err)
+		// GUI 子系统下没有控制台，构建失败时改用消息框提示，避免“无声退出”。
+		walk.MsgBox(nil, "二维码生成器", "初始化失败: "+err.Error(), walk.MsgBoxOK|walk.MsgBoxIconHand)
 		os.Exit(1)
 	}
 	// 设置窗口图标（使用 rsrc 嵌入的 qrcode.ico，失败不致命）
@@ -38,7 +38,12 @@ func main() {
 	_ = u.loadHistoryFile()
 	// 托盘（失败不致命）
 	_ = setupTray(u, mw)
-	// 进入消息循环，阻塞直到窗口关闭
+	// 显示主窗口并进入消息循环。
+	// 注意：walk 的 MainWindow.Run() 不会自动显示窗口（Run 仅泵消息循环，
+	// cgo 与默认两版 mainLoop 皆如此），必须在 Run 前显式 Show，
+	// 否则只会看到托盘图标、主窗口隐藏。
+	mw.Show()
+	mw.Activate()
 	mw.Run()
 }
 

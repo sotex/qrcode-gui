@@ -1,14 +1,14 @@
-<#
+ï»¿<#
 .SYNOPSIS
-    ±àÒë²¢´ò°ü¶şÎ¬ÂëÉú³ÉÆ÷ (walk GUI, Windows/amd64)¡£
+    ç¼–è¯‘å¹¶æ‰“åŒ…äºŒç»´ç ç”Ÿæˆå™¨ (walk GUI, Windows/amd64)ã€‚
 .DESCRIPTION
-    1) ÓÃ rsrc °Ñ app.manifest Óë qrcode.ico ÖØĞÂÇ¶Èë rsrc.syso£¨¾ö¶¨ exe µÄ Windows Í¼±êÓë DPI/ÊÓ¾õÑùÊ½£©¡£
-    2) go build Éú³É¾²Ì¬Á´½ÓµÄ qrcode-gui.exe£¨CGO_ENABLED=0£¬¿çÆ½Ì¨Ò²¿ÉÔÚ Linux/macOS ÉÏ½»²æ±àÒë³ö Windows exe£©¡£
-    3) °Ñ exe ´ò°ü³É dist/qrcode-gui.zip¡£
+    1) ç”¨ rsrc æŠŠ app.manifest ä¸ qrcode.ico é‡æ–°åµŒå…¥ rsrc.sysoï¼ˆå†³å®š exe çš„ Windows å›¾æ ‡ä¸ DPI/è§†è§‰æ ·å¼ï¼‰ã€‚
+    2) go build ç”Ÿæˆé™æ€é“¾æ¥çš„ qrcode-gui.exeï¼ˆCGO_ENABLED=0ï¼Œè·¨å¹³å°ä¹Ÿå¯åœ¨ Linux/macOS ä¸Šäº¤å‰ç¼–è¯‘å‡º Windows exeï¼‰ã€‚
+    3) æŠŠ exe æ‰“åŒ…æˆ dist/qrcode-gui.zipã€‚
 .PARAMETER OutputName
-    Êä³ö exe ÎÄ¼şÃû£¬Ä¬ÈÏ qrcode-gui.exe¡£
+    è¾“å‡º exe æ–‡ä»¶åï¼Œé»˜è®¤ qrcode-gui.exeã€‚
 .PARAMETER NoPackage
-    Ìø¹ıÉú³É zip ´ò°ü²½Öè£¬½ö±àÒë¡£
+    è·³è¿‡ç”Ÿæˆ zip æ‰“åŒ…æ­¥éª¤ï¼Œä»…ç¼–è¯‘ã€‚
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File build.ps1
 #>
@@ -20,69 +20,70 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# ÏîÄ¿¸ùÄ¿Â¼£¨½Å±¾ËùÔÚÄ¿Â¼£©
+# é¡¹ç›®æ ¹ç›®å½•ï¼ˆè„šæœ¬æ‰€åœ¨ç›®å½•ï¼‰
 $Root = $PSScriptRoot
 if (-not $Root) { $Root = (Get-Location).Path }
 Set-Location $Root
 
-# ---- 0) Ç°ÖÃ¼ì²é ----
+# ---- 0) å‰ç½®æ£€æŸ¥ ----
 if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
-    throw "Î´ÕÒµ½ go ÃüÁî£¬ÇëÏÈ°²×° Go ²¢¼ÓÈë PATH¡£"
+    throw "æœªæ‰¾åˆ° go å‘½ä»¤ï¼Œè¯·å…ˆå®‰è£… Go å¹¶åŠ å…¥ PATHã€‚"
 }
-if (-not (Test-Path app.manifest)) { throw "È±ÉÙ app.manifest" }
-if (-not (Test-Path qrcode.ico))   { throw "È±ÉÙ qrcode.ico£¨³ÌĞòÍ¼±ê£©" }
+if (-not (Test-Path app.manifest)) { throw "ç¼ºå°‘ app.manifest" }
+if (-not (Test-Path qrcode.ico))   { throw "ç¼ºå°‘ qrcode.icoï¼ˆç¨‹åºå›¾æ ‡ï¼‰" }
 
 $OutDir  = Join-Path $Root 'dist'
 $ExePath = Join-Path $OutDir $OutputName
 
-# ---- 1) ×ÊÔ´£ºmanifest + Í¼±ê Ç¶Èë rsrc.syso ----
-# ×ÊÔ´ ID Ô¼¶¨£¨Óë main.go µÄ appIconResID ¶ÔÓ¦£©£ºrsrc °´ÉùÃ÷Ë³Ğò·ÖÅä ID£¬
-# 1=RT_MANIFEST(app.manifest)£¬2=RT_GROUP_ICON(qrcode.ico)¡£
+# ---- 1) èµ„æºï¼šmanifest + å›¾æ ‡ åµŒå…¥ rsrc.syso ----
+# èµ„æº ID çº¦å®šï¼ˆä¸ main.go çš„ appIconResID å¯¹åº”ï¼‰ï¼šrsrc æŒ‰å£°æ˜é¡ºåºåˆ†é… IDï¼Œ
+# 1=RT_MANIFEST(app.manifest)ï¼Œ2=RT_GROUP_ICON(qrcode.ico)ã€‚
 $rsrc = Join-Path $Root 'rsrc.exe'
 if (-not (Test-Path $rsrc)) {
     $gopath = & go env GOPATH
     $rsrc = Join-Path $gopath 'bin\rsrc.exe'
     if (-not (Test-Path $rsrc)) {
-        Write-Host "Î´ÕÒµ½ rsrc£¬³¢ÊÔ go install github.com/akavel/rsrc@latest ..."
+        Write-Host "æœªæ‰¾åˆ° rsrcï¼Œå°è¯• go install github.com/akavel/rsrc@latest ..."
         & go install github.com/akavel/rsrc@latest
         $gopath = & go env GOPATH
         $rsrc = Join-Path $gopath 'bin\rsrc.exe'
     }
 }
-if (-not (Test-Path $rsrc)) { throw "ÎŞ·¨»ñÈ¡ rsrc ¹¤¾ß£¨ÓÃÓÚÇ¶ÈëÍ¼±ê/Çåµ¥£©" }
+if (-not (Test-Path $rsrc)) { throw "æ— æ³•è·å– rsrc å·¥å…·ï¼ˆç”¨äºåµŒå…¥å›¾æ ‡/æ¸…å•ï¼‰" }
 
-Write-Host "==> Éú³É×ÊÔ´ rsrc.syso (manifest + Í¼±ê) ..."
+Write-Host "==> ç”Ÿæˆèµ„æº rsrc.syso (manifest + å›¾æ ‡) ..."
 & $rsrc -manifest app.manifest -ico qrcode.ico -o rsrc.syso
-if ($LASTEXITCODE -ne 0) { throw "rsrc Éú³É×ÊÔ´Ê§°Ü" }
+if ($LASTEXITCODE -ne 0) { throw "rsrc ç”Ÿæˆèµ„æºå¤±è´¥" }
 
-# ---- 2) °æ±¾ĞÅÏ¢£¨Í¨¹ı -ldflags -X ×¢Èë main.version / main.buildTime£©----
+# ---- 2) ç‰ˆæœ¬ä¿¡æ¯ï¼ˆé€šè¿‡ -ldflags -X æ³¨å…¥ main.version / main.buildTimeï¼‰----
 $version = "dev"
 $gitDesc = & git describe --tags --always --dirty 2>$null
 if ($LASTEXITCODE -eq 0 -and $gitDesc) { $version = $gitDesc.Trim() }
-# ×¢Òâ£º²»ÄÜº¬¿Õ¸ñ£¬·ñÔò -X ×¢ÈëµÄÖµ»á±»Á´½ÓÆ÷°´¿Õ¸ñ²ğ³É¶à¸ö²ÎÊı¶ø±¨´í¡£
+# æ³¨æ„ï¼šä¸èƒ½å«ç©ºæ ¼ï¼Œå¦åˆ™ -X æ³¨å…¥çš„å€¼ä¼šè¢«é“¾æ¥å™¨æŒ‰ç©ºæ ¼æ‹†æˆå¤šä¸ªå‚æ•°è€ŒæŠ¥é”™ã€‚
 $buildTime = Get-Date -Format "yyyy-MM-ddTHH:mm:ss"
-$ldflags = "-s -w -X main.version=$version -X main.buildTime=$buildTime"
+# -H windowsguiï¼šé“¾æ¥ä¸º Windows GUI å­ç³»ç»Ÿï¼Œè¿è¡Œæ—¶ä¸å¼¹å‡ºæ§åˆ¶å°çª—å£ã€‚
+$ldflags = "-s -w -H windowsgui -X main.version=$version -X main.buildTime=$buildTime"
 
-# ---- 3) ±àÒë£¨¾²Ì¬Á´½Ó£¬ÎŞ CGO ÒÀÀµ£©----
+# ---- 3) ç¼–è¯‘ï¼ˆé™æ€é“¾æ¥ï¼Œæ—  CGO ä¾èµ–ï¼‰----
 $env:CGO_ENABLED = '0'
 $env:GOOS        = 'windows'
 $env:GOARCH      = 'amd64'
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
-Write-Host "==> ±àÒë $OutputName (version=$version, build=$buildTime) ..."
+Write-Host "==> ç¼–è¯‘ $OutputName (version=$version, build=$buildTime) ..."
 & go build -ldflags $ldflags -o $ExePath .
-if ($LASTEXITCODE -ne 0) { throw "go build Ê§°Ü" }
+if ($LASTEXITCODE -ne 0) { throw "go build å¤±è´¥" }
 
 $sizeKB = [math]::Round((Get-Item $ExePath).Length / 1KB, 1)
-Write-Host "    ²úÎï: $ExePath ($sizeKB KB)"
+Write-Host "    äº§ç‰©: $ExePath ($sizeKB KB)"
 
-# ---- 4) ´ò°ü ----
+# ---- 4) æ‰“åŒ… ----
 if (-not $NoPackage) {
     $zip = Join-Path $OutDir 'qrcode-gui.zip'
     if (Test-Path $zip) { Remove-Item $zip -Force }
     Compress-Archive -Path $ExePath -DestinationPath $zip -Force
     $zipKB = [math]::Round((Get-Item $zip).Length / 1KB, 1)
-    Write-Host "==> ÒÑ´ò°ü: $zip ($zipKB KB)"
+    Write-Host "==> å·²æ‰“åŒ…: $zip ($zipKB KB)"
 }
 
-Write-Host "¹¹½¨Íê³É¡£" -ForegroundColor Green
+Write-Host "æ„å»ºå®Œæˆã€‚" -ForegroundColor Green
