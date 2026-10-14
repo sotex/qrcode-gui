@@ -637,6 +637,7 @@ func (u *UI) showHistoryDialog() {
 
 	tv := must(walk.NewTableView(dlg))
 	tv.SetLastColumnStretched(true)
+	_ = tv.SetMultiSelection(true) // 允许历史表格多选，配合“删除选中”批量删除
 	c0 := walk.NewTableViewColumn()
 	c0.SetName("Time")
 	_ = c0.SetTitle("时间")
@@ -669,11 +670,11 @@ func (u *UI) showHistoryDialog() {
 		dlg.Accept()
 	})
 	delBtn.Clicked().Attach(func() {
-		idx := tv.CurrentIndex()
-		if idx < 0 {
+		idxs := tv.SelectedIndexes()
+		if len(idxs) == 0 {
 			return
 		}
-		u.deleteHistory(idx)
+		u.deleteHistories(idxs)
 		u.populateHistory(tv)
 	})
 	clearBtn.Clicked().Attach(func() {

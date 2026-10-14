@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -92,16 +93,54 @@ func (u *UI) addHistory(text string, p Params, pages int) {
 
 // deleteHistory 按索引删除一条记录。
 func (u *UI) deleteHistory(i int) {
+	u.deleteHistories([]int{i})
+}
+
+// removeByIndexes 从切片中删除指定索引的元素，返回新切片（不修改入参）。
+// 重复索引自动去重，越界与负索引自动忽略，索引顺序无关（内部从大到小处理）。
+func removeByIndexes[T any](src []T, idxs []int) []T {
+	seen := make(map[int]struct{}, len(idxs))
+	order := make([]int, 0, len(idxs))
+	for _, i := range idxs {
+		if i < 0 {
+			continue
+		}
+		if _, ok := seen[i]; ok {
+			continue
+		}
+		seen[i] = struct{}{}
+		order = append(order, i)
+	}
+	if len(order) == 0 {
+		return src
+	}
+	// 从大到小删除，保证每个待删索引在删除时仍指向正确的原始行
+	sort.Sort(sort.Reverse(sort.IntSlice(order)))
+	out := append([]T(nil), src...)
+	for _, i := range order {
+		if i < len(out) {
+			out = append(out[:i], out[i+1:]...)
+		}
+	}
+	return out
+}
+
+// deleteHistories 按多个索引批量删除记录（用于历史对话框的多选删除）。
+func (u *UI) deleteHistories(idxs []int) {
 	u.mu.Lock()
-	if i < 0 || i >= len(u.history) {
+	if len(u.history) == 0 {
 		u.mu.Unlock()
 		return
 	}
-	u.history = append(u.history[:i], u.history[i+1:]...)
+	next := removeByIndexes(u.history, idxs)
+	removed := len(u.history) - len(next)
+	u.history = next
 	list := u.history
 	u.mu.Unlock()
-	u.persist(list)
-	u.setStatus("已删除一条历史记录")
+	if removed > 0 {
+		u.persist(list)
+		u.setStatus(fmt.Sprintf("已删除 %d 条历史记录", removed))
+	}
 }
 
 // clearHistory 清空全部历史记录。
