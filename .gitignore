@@ -2,6 +2,9 @@
 qrcode-gui.exe
 *.exe
 
+# Build output of build.ps1
+dist/
+
 # Local WorkBuddy tooling state
 .workbuddy/
 

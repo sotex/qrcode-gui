@@ -1,4 +1,4 @@
-//go:generate rsrc -manifest app.manifest -o rsrc.syso
+//go:generate rsrc -manifest app.manifest -ico qrcode.ico -o rsrc.syso
 
 package main
 
@@ -11,12 +11,28 @@ import (
 	"github.com/lxn/walk"
 )
 
+// 版本信息由 build.ps1 通过 -ldflags -X 注入；默认值用于本地直接 go build。
+var (
+	version   = "dev"
+	buildTime = ""
+)
+
+// appIconResID 是 rsrc 嵌入的图标资源 ID。
+// rsrc 按资源声明顺序分配 ID：1=manifest(RT_MANIFEST)，2=图标组(RT_GROUP_ICON)，
+// 因此 qrcode.ico 作为程序图标的资源 ID 固定为 2。若只嵌入 manifest（未带 -ico），
+// 则不存在该资源，NewIconFromResourceId(2) 会失败——所有使用处都做了错误回退，不会崩溃。
+const appIconResID = 2
+
 func main() {
 	u := NewUI()
 	mw, err := u.build()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "初始化失败: %v\n", err)
 		os.Exit(1)
+	}
+	// 设置窗口图标（使用 rsrc 嵌入的 qrcode.ico，失败不致命）
+	if icon, err := walk.NewIconFromResourceId(appIconResID); err == nil {
+		_ = mw.SetIcon(icon)
 	}
 	// 载入历史记录（失败不致命）
 	_ = u.loadHistoryFile()
@@ -68,7 +84,10 @@ func setupTray(u *UI, mw *walk.MainWindow) error {
 	})
 	menu.Actions().Add(aExit)
 
-	if icon, err := makeTrayIcon(); err == nil {
+	if icon, err := walk.NewIconFromResourceId(appIconResID); err == nil {
+		ni.SetIcon(icon)
+	} else if icon, err := makeTrayIcon(); err == nil {
+		// 资源图标不可用时回退为生成的二维码图标
 		ni.SetIcon(icon)
 	}
 	ni.SetToolTip("二维码生成器")
