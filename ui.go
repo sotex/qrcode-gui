@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,14 +46,15 @@ type UI struct {
 	statusLabel *walk.Label
 
 	// 右栏参数
-	ecCombo     *walk.ComboBox
-	borderEdit  *walk.NumberEdit
-	colorChk    *walk.CheckBox
-	fgEdit      *walk.LineEdit
-	bgEdit      *walk.LineEdit
-	autoPageChk *walk.CheckBox
-	charsEdit   *walk.NumberEdit
-	markerChk   *walk.CheckBox
+	ecCombo          *walk.ComboBox
+	borderEdit       *walk.NumberEdit
+	colorChk         *walk.CheckBox
+	colorCountCombo  *walk.ComboBox
+	fgEdit           *walk.LineEdit
+	bgEdit           *walk.LineEdit
+	autoPageChk      *walk.CheckBox
+	charsEdit        *walk.NumberEdit
+	markerChk        *walk.CheckBox
 
 	// 右栏输入
 	textEdit       *walk.TextEdit
@@ -161,8 +163,21 @@ func (u *UI) build() (*walk.MainWindow, error) {
 	_ = u.borderEdit.SetSpinButtonsVisible(true)
 
 	u.colorChk = must(walk.NewCheckBox(paramPane))
-	u.colorChk.SetText("启用彩色二维码（预留）")
-	u.colorChk.SetVisible(false) // 彩色二维码为将来扩展功能，当前不显示
+	u.colorChk.SetText("彩色二维码 (JAB Code)")
+	u.colorChk.SetChecked(false)
+	u.colorChk.SetAlignment(walk.AlignHNearVNear) // 左对齐，与上方参数行一致
+
+	// 颜色数（4 / 8），仅彩色模式显示（JAB Code 仅 4/8 为 ISO 标准色数）
+	colorCountRow := must(walk.NewComposite(paramPane))
+	colorCountRow.SetLayout(tight(walk.NewHBoxLayout()))
+	ccLbl := must(walk.NewLabel(colorCountRow))
+	ccLbl.SetText("颜色数")
+	u.colorCountCombo = must(walk.NewComboBox(colorCountRow))
+	_ = u.colorCountCombo.SetModel([]string{"4 (4色)", "8 (8色)"})
+	_ = u.colorCountCombo.SetCurrentIndex(1) // 默认 8 色
+	colorCountRow.SetVisible(false)
+
+	// 前景/背景色：仅黑白自定义时有意义，彩色（JAB）模式无效，始终不显示。
 	colorPane := must(walk.NewComposite(paramPane))
 	colorPane.SetLayout(tight(walk.NewHBoxLayout()))
 	fgLbl := must(walk.NewLabel(colorPane))
@@ -231,7 +246,9 @@ func (u *UI) build() (*walk.MainWindow, error) {
 	u.ecCombo.CurrentIndexChanged().Attach(u.scheduleGenerate)
 	u.borderEdit.ValueChanged().Attach(u.scheduleGenerate)
 	u.colorChk.CheckedChanged().Attach(func() {
-		colorPane.SetVisible(u.colorChk.Checked())
+		on := u.colorChk.Checked()
+		colorCountRow.SetVisible(on) // 颜色数选择仅在彩色模式显示
+		colorPane.SetVisible(false)  // 前景/背景色对 JAB Code 无效，始终隐藏
 		u.scheduleGenerate()
 	})
 	u.fgEdit.TextChanged().Attach(u.scheduleGenerate)
@@ -294,12 +311,27 @@ func (u *UI) readParams() Params {
 		ECLevel:      ec,
 		Border:       border,
 		ColorMode:    u.colorChk.Checked(),
+		ColorCount:   comboColorCount(u.colorCountCombo),
 		FgColor:      fg,
 		BgColor:      bg,
 		AutoPage:     u.autoPageChk.Checked(),
 		CharsPerPage: chars,
 		PageMarker:   u.markerChk.Checked(),
 	}
+}
+
+// comboColorCount 解析颜色数下拉框（形如 "8 (8色)"），取首个整数字段；解析失败回退 8。
+func comboColorCount(c *walk.ComboBox) int {
+	if c == nil {
+		return 8
+	}
+	fields := strings.Fields(c.Text())
+	if len(fields) > 0 {
+		if v, err := strconv.Atoi(fields[0]); err == nil {
+			return v
+		}
+	}
+	return 8
 }
 
 // fingerprint 生成输入指纹用于脏检测。
@@ -355,8 +387,15 @@ func (u *UI) regenerate() {
 
 		// 仅预渲染第 0 页，其余页按需（翻页时）再渲染
 		var img *image.NRGBA
+		var rerr error
 		if len(pages) > 0 && !pages[0].Overflow {
-			img, _ = renderPage(pages[0].Text, p)
+			img, rerr = renderPage(pages[0].Text, p)
+		}
+		if rerr != nil {
+			u.clearImage()
+			u.updateNav()
+			u.setStatus("渲染失败: " + rerr.Error())
+			return
 		}
 
 		u.mw.Synchronize(func() {

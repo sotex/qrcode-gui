@@ -1,9 +1,17 @@
+github.com/ebitengine/purego v0.10.2 h1:W809HbnvzAxgdm+aOvlSekrM16wGCdT/e76+9tS7gzE=
+github.com/ebitengine/purego v0.10.2/go.mod h1:iIjxzd6CiRiOG0UyXP+V1+jWqUXVjPKLAI0mRfJZTmQ=
+github.com/gogpu/naga v0.18.0 h1:2y83HUcAnlwEZMuHOiYTMdNYM9J8rev40gkI4zJ96Uk=
+github.com/gogpu/naga v0.18.0/go.mod h1:15sQaHKkbqXcwTN+hHYGLsA0WBBnkmYzne/eF5p5WEg=
 github.com/lxn/walk v0.0.0-20210112085537-c389da54e794 h1:NVRJ0Uy0SOFcXSKLsS65OmI1sgCCfiDUPj+cwnH7GZw=
 github.com/lxn/walk v0.0.0-20210112085537-c389da54e794/go.mod h1:E23UucZGqpuUANJooIbHWCufXvOcT6E7Stq81gU+CSQ=
 github.com/lxn/win v0.0.0-20210218163916-a377121e959e h1:H+t6A/QJMbhCSEH5rAuRxh+CtW96g0Or0Fxa9IKr4uc=
 github.com/lxn/win v0.0.0-20210218163916-a377121e959e/go.mod h1:KxxjdtRkfNoYDCUP5ryK7XJJNTnpC8atvtmTheChOtk=
 github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e h1:MRM5ITcdelLK2j1vwZ3Je0FKVCfqOLp5zO6trqMLYs0=
 github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e/go.mod h1:XV66xRDqSt+GTGFMVlhk3ULuV0y9ZmzeVGR4mloJI3M=
+github.com/srlehn/jabcode v0.0.0-20260903100122-cba4c60bd079 h1:t65iRpeRTrR1mKNk0Y6v+C7pasrDOvSYqcTzHlt3PXI=
+github.com/srlehn/jabcode v0.0.0-20260903100122-cba4c60bd079/go.mod h1:jkJx+BQ5yBnOtynPG8aKqC2Xh8Etufk280eVT/X/reI=
+github.com/srlehn/vulki v0.0.0-20260816043318-18250f66ba53 h1:hk3x5Zs92oKXTUo9NsqJJng86Hm8udpV6ZxJ1bhhwjY=
+github.com/srlehn/vulki v0.0.0-20260816043318-18250f66ba53/go.mod h1:jmZb4m/IsM/j7Ms9DtWaBK5RcA4KztVMnWEJtCNb1s4=
 golang.org/x/sys v0.0.0-20201018230417-eeed37f84f13/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=
 golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=
 golang.org/x/sys v0.49.0/go.mod h1:hNLxWAXmnKAxqDtdwIYC4bM9oQPEecfsnNMuSxOs3og=
